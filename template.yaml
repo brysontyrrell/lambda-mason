@@ -1,0 +1,126 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: A service to auto-build and publish Python layers for AWS Lambda functions
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+
+  PythonPackages:
+    Type: CommaDelimitedList
+
+Resources:
+
+  PublishedReleases:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      PrimaryKey:
+        Name: PackageName
+        Type: String
+
+  PackagePoller:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: python3.6
+      CodeUri: ./src/functions/package_poller
+      Handler: package_poller.lambda_handler
+      Environment:
+        Variables:
+          PYTHON_PACKAGES: !Join [',', !Ref PythonPackages]
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PublishedReleases
+      Events:
+        CronJob:
+          Type: Schedule
+          Properties:
+            Schedule: rate(15 minutes)
+
+  PackageBuilder:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: python3.6
+      CodeUri: ./src/functions/package_builder
+      Handler: package_builder.lambda_handler
+
+  CloudFormationLauncher:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: python3.6
+      CodeUri: ./src/functions/cloudformation_launcher
+      Handler: cloudformation_launcher.lambda_handler
+
+  StatesExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: !Sub 'states.${AWS::Region}.amazonaws.com'
+            Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: StatesExecutionPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: "*"
+
+  LayerBuilderStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      RoleArn: !Sub 'arn:aws:iam::${AWS::AccountId}:role/service-role/StatesExecutionRole-${AWS::Region}'
+      DefinitionString:
+        !Sub
+          - |-
+            {
+              "Comment": "Python Layer builder state machine",
+              "StartAt": "ParallelPythonBuilds",
+              "States": {
+                "ParallelPythonBuilds": {
+                  "Type": "Parallel",
+                  "Next": "PublishToCloudFormation",
+                  "Branches": [
+                    {
+                      "StartAt": "Build27",
+                      "States": {
+                        "Build27": {
+                          "Type": "Task",
+                          "Resource": "${builderLambdaArn}",
+                          "End": true
+                        }
+                      }
+                    },
+                    {
+                      "StartAt": "Build36",
+                      "States": {
+                        "Build36": {
+                          "Type": "Task",
+                          "Resource": "${builderLambdaArn}",
+                          "End": true
+                        }
+                      }
+                    },
+                    {
+                      "StartAt": "Build37",
+                      "States": {
+                        "Build37": {
+                          "Type": "Task",
+                          "Resource": "${builderLambdaArn}",
+                          "End": true
+                        }
+                      }
+                    }
+                  ]
+                },
+                "PublishToCloudFormation": {
+                  "Type": "Task",
+                  "Resource": "${publishLambdaArn}",
+                  "End": true
+                }
+              }
+            }
+          - builderLambdaArn: !GetAtt PackageBuilder.Arn
+            publishLambdaArn: !GetAtt CloudFormationLauncher.Arn
